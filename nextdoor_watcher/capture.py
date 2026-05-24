@@ -65,6 +65,11 @@ def build_sidecar(action: Action, *, post_url: str, post_slug: str, run_id: str,
             first_missing_at=action.first_missing_at,
             confirmed_deleted_at=action.confirmed_deleted_at,
         )
+
+    if action.is_post:
+        common["is_post"] = True
+        common["post_id"] = action.post_node_id
+
     return common
 
 

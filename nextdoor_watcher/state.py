@@ -87,6 +87,10 @@ class PostStore:
     def load_meta(self) -> dict:
         return read_json(self.paths.post_meta(self.url), {}) or {}
 
+    def load_post_state(self) -> dict | None:
+        """The original-post state recorded under post-meta.json's `post` key."""
+        return self.load_meta().get("post")
+
     def update_meta(
         self,
         *,
@@ -96,6 +100,7 @@ class PostStore:
         deleted_count: int,
         seen: dict,
         run_id: str,
+        post_state: dict | None = None,
     ) -> None:
         meta = self.load_meta()
         now = iso()
@@ -107,6 +112,8 @@ class PostStore:
         meta["last_scrape_new_count"] = new_count
         meta["last_scrape_edited_count"] = edited_count
         meta["last_scrape_deleted_count"] = deleted_count
+        if post_state is not None:
+            meta["post"] = post_state
         meta["total_seen"] = len(seen)
         meta["total_currently_live"] = sum(
             1 for e in seen.values() if e.get("status") == "live"

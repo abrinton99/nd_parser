@@ -1,11 +1,14 @@
 # nextdoor-watcher
 
-A one-shot, cron-friendly command-line tool that screenshots **new, edited, and
+A one-shot, scheduler-friendly command-line tool that screenshots **new, edited, and
 deleted comments** on a user-defined list of Nextdoor posts.
 
 Each invocation reads your watchlist, polls every URL once, captures any changed
 comments as element-scoped PNG screenshots plus sidecar JSON, persists state,
-and exits. Scheduling is the OS's job — install it as a cron job. There is no
+and exits. It also captures the **original post** once per URL (and again if the
+post body is edited) so each comment has its context. Scheduling is the OS's
+job — on WSL/Windows you register a Windows Task Scheduler task that runs a
+generated wrapper script via `wsl.exe` (see `install-schedule`). There is no
 background daemon, so a single bad run can never take down a long-lived process.
 
 > You are responsible for ensuring your use complies with Nextdoor's Terms of
@@ -14,7 +17,7 @@ background daemon, so a single bad run can never take down a long-lived process.
 ## How it works
 
 ```
-OS cron fires  ->  nextdoor-watcher scrape  ->  per-post screenshots + state
+Windows Task Scheduler  ->  wsl.exe run-watcher.sh  ->  nextdoor-watcher scrape  ->  per-post screenshots + state
 ```
 
 1. Acquire a lock (skip cleanly if a previous run is still going).
@@ -59,8 +62,8 @@ nextdoor-watcher validate --input-file watchlist.txt
 # 4. Scrape once. The first run "seeds" existing comments without capturing them.
 nextdoor-watcher scrape --input-file watchlist.txt --output-dir ./data
 
-# 5. Print a cron line to run it every 15 minutes.
-nextdoor-watcher install-cron --input-file watchlist.txt --every 15 --output-dir ./data
+# 5. Generate the WSL wrapper + Windows Task Scheduler commands to run it every 15 min.
+nextdoor-watcher install-schedule --input-file watchlist.txt --every 15 --output-dir ./data
 ```
 
 See [EXAMPLES.md](EXAMPLES.md) for the full set of workflows, including SMTP
@@ -74,7 +77,7 @@ notifications and the Gmail app-password caveat.
 | `scrape` | The core one-shot command. Reads input, scrapes once, writes captures + state. |
 | `validate` | Report `OK` / `SKIP` / `BAD` for each watchlist line. Exit 0 only if all are OK. |
 | `status` | Show last run, watched posts, session age, and lock state. |
-| `install-cron` | Print a cron line to paste into your crontab (Linux only; does not edit it). |
+| `install-schedule` | Write a WSL wrapper script and print the Windows Task Scheduler commands to run it on an interval (does not modify Windows). |
 | `test-notify` | Send a one-off test email to confirm SMTP config (bypasses cooldown). |
 
 ### `scrape` flags
@@ -84,8 +87,8 @@ notifications and the Gmail app-password caveat.
 - `--first-run-mode {seed,capture-all}` — on a URL's *first ever* scrape, `seed`
   (default) records existing comments without screenshotting them; `capture-all`
   screenshots them too.
-- `--dry-run` — do everything except write PNG/JSON/state files (selector + cron testing).
-- `--quiet` — suppress stdout; log to file only. Recommended for cron.
+- `--dry-run` — do everything except write PNG/JSON/state files (selector + schedule testing).
+- `--quiet` — suppress stdout; log to file only. Used by the scheduled wrapper.
 
 ## Exit codes
 
@@ -108,6 +111,7 @@ notifications and the Gmail app-password caveat.
 │   ├── post-meta.json            # url, totals, last-scrape result
 │   ├── seen.json                 # comment id -> status + content hash + revisions
 │   └── captures/
+│       ├── <run_id>__post__new.png + .json         # the original post (once, + on edits)
 │       ├── <run_id>__<comment_id>__new.png + .json
 │       ├── <run_id>__<comment_id>__edited.png + .json
 │       └── <run_id>__<comment_id>__deleted.json   # JSON only; the comment is gone

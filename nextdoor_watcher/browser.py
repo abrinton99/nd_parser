@@ -16,7 +16,13 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 
 from . import selectors as sel
-from .extract import ExtractedComment, extract_from_html, parse_comment_node
+from .extract import (
+    ExtractedComment,
+    ExtractedPost,
+    extract_from_html,
+    extract_post_from_html,
+    parse_comment_node,
+)
 
 LOGIN_URL = "https://nextdoor.com/login/"
 DEFAULT_VIEWPORT = {"width": 1440, "height": 900}
@@ -221,6 +227,55 @@ def extract_live(page) -> tuple[list[ExtractedComment], dict]:
             parsed = parse_comment_node(tag, is_reply=False, parent_comment_id=None)
             handles.setdefault(parsed.comment_id, node.element_handle())
     return comments, handles
+
+
+def _expand_post_see_more(post_loc) -> None:
+    """Click the post's "… see more" toggle(s), scoped to the given post node,
+    so the full body is rendered before we read/screenshot it. Capped to avoid
+    loops on broken pages."""
+    for _ in range(5):
+        clicked = False
+        for css in sel.candidates("post_see_more"):
+            try:
+                buttons = post_loc.locator(css)
+                count = buttons.count()
+            except Exception:
+                continue
+            for i in range(count):
+                btn = buttons.nth(i)
+                try:
+                    if btn.is_visible():
+                        btn.click(timeout=2000)
+                        clicked = True
+                        post_loc.page.wait_for_timeout(300)
+                except Exception:
+                    continue
+        if not clicked:
+            break
+
+
+def extract_post_live(page) -> tuple[ExtractedPost | None, object]:
+    """Extract the original post and return it with its element handle.
+
+    Expands the post's "see more" toggle first, then parses the post node's own
+    (now-full) outerHTML so the parsed fields and the handle used for the
+    screenshot always refer to the same, fully-expanded element.
+    """
+    for css in (c for c in sel.candidates("post_node") if ":has-text(" not in c):
+        try:
+            loc = page.locator(css).first
+            if loc.count() == 0:
+                continue
+            _expand_post_see_more(loc)
+            # Re-acquire the handle after expansion in case the node re-rendered.
+            handle = loc.element_handle()
+            outer = handle.evaluate("el => el.outerHTML")
+        except Exception:
+            continue
+        post = extract_post_from_html(outer)
+        if post is not None:
+            return post, handle
+    return None, None
 
 
 def _container_html(page) -> str:

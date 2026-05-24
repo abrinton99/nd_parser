@@ -33,6 +33,7 @@ class UrlResult:
     error: str | None = None
     fatal: str | None = None  # "session_expired"
     layout_warning: bool = False
+    post_class: str = "unchanged"  # new | edited | unchanged | missing
 
 
 @dataclass
@@ -60,10 +61,12 @@ def scrape_one(page, url: str, cfg: Config, paths: Paths, run_id: str,
         ensure_logged_in,
         expand_all_comments,
         extract_live,
+        extract_post_live,
         take_element_screenshot,
         wait_for_post_loaded,
     )
     from .capture import write_sidecar
+    from .diff import diff_post
 
     log = get_logger()
     started = time.monotonic()
@@ -78,9 +81,12 @@ def scrape_one(page, url: str, cfg: Config, paths: Paths, run_id: str,
             ensure_logged_in(page)
             expand_all_comments(page)
             comments, handles = extract_live(page)
+            post, post_handle = extract_post_live(page)
 
             if not comments:
                 log.warning(f"scrape warn url={slug} zero comments (page layout may have changed)")
+            if post is None:
+                log.warning(f"scrape warn url={slug} post body not found (page layout may have changed)")
 
             store = PostStore(paths, url)
             is_first = store.is_first_run
@@ -92,9 +98,22 @@ def scrape_one(page, url: str, cfg: Config, paths: Paths, run_id: str,
                 run_id=run_id, observed_at=observed_at,
                 is_first_run=is_first, first_run_mode=cfg.first_run_mode,
             )
+            post_action, next_post_state, post_class = diff_post(
+                post, store.load_post_state(), run_id=run_id, observed_at=observed_at,
+            )
 
             if not opts.dry_run:
                 captures_dir = paths.captures_dir(url)
+                # Capture the original post first (context), then the comments.
+                if post_action is not None:
+                    if post_action.screenshot_rel:
+                        png_path = paths.post_dir(url) / post_action.screenshot_rel
+                        if not take_element_screenshot(post_handle, png_path):
+                            log.warning(f"screenshot failed url={slug} post class={post_action.cls}")
+                    write_sidecar(
+                        post_action, captures_dir=captures_dir, post_url=url,
+                        post_slug=slug, run_id=run_id, observed_at=observed_at,
+                    )
                 for action in result.actions:
                     if action.cls in ("new", "edited") and action.screenshot_rel:
                         png_path = paths.post_dir(url) / action.screenshot_rel
@@ -116,18 +135,20 @@ def scrape_one(page, url: str, cfg: Config, paths: Paths, run_id: str,
                     deleted_count=result.deleted_count,
                     seen=result.next_seen,
                     run_id=run_id,
+                    post_state=next_post_state,
                 )
 
             took = time.monotonic() - started
             total = len(result.next_seen)
             log.info(
-                f"scrape ok url={slug} new={result.new_count} edited={result.edited_count} "
-                f"deleted={result.deleted_count} total={total} took={took:.1f}s"
+                f"scrape ok url={slug} post={post_class} new={result.new_count} "
+                f"edited={result.edited_count} deleted={result.deleted_count} "
+                f"total={total} took={took:.1f}s"
             )
             return UrlResult(
                 url=url, ok=True, new=result.new_count, edited=result.edited_count,
                 deleted=result.deleted_count, took_seconds=round(took, 1),
-                layout_warning=not comments,
+                layout_warning=not comments, post_class=post_class,
             )
 
         except SessionExpired as exc:
@@ -154,7 +175,7 @@ def _summarize(run_id: str, started_iso: str, results: list[UrlResult],
         item = {"url": r.url, "ok": r.ok}
         if r.ok:
             item.update(new=r.new, edited=r.edited, deleted=r.deleted,
-                        took_seconds=r.took_seconds)
+                        post=r.post_class, took_seconds=r.took_seconds)
         else:
             item["error"] = r.error or r.fatal or "unknown"
         urls.append(item)

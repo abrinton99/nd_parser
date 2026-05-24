@@ -44,26 +44,50 @@ nextdoor-watcher scrape --input-file watchlist.txt --output-dir ./data --first-r
 nextdoor-watcher scrape --input-file watchlist.txt --output-dir ./data --dry-run
 ```
 
-## 4. Install the cron job (Linux)
+## 4. Schedule it (WSL + Windows Task Scheduler)
+
+WSL has no reliable always-on cron (its `cron` daemon only runs while a WSL
+session is open), so scheduling is owned by **Windows Task Scheduler**, which
+launches a generated wrapper script inside WSL via `wsl.exe`.
+
+Run this **inside WSL**:
 
 ```bash
-nextdoor-watcher install-cron --input-file ./watchlist.txt --every 15 --output-dir ./data
+nextdoor-watcher install-schedule --input-file ./watchlist.txt --every 15 --output-dir ./data
 ```
 
-This **prints** a line; it does not edit your crontab. Paste it into `crontab -e`:
+It does two things:
 
-```cron
-MAILTO=you@example.com
-*/15 * * * * sleep $((RANDOM \% 60)); /path/to/nextdoor-watcher scrape \
-    --input-file /abs/watchlist.txt --output-dir /abs/data --quiet \
-    >> /abs/data/logs/cron.out 2>&1
+1. **Writes** `./data/run-watcher.sh` — a wrapper that sources your SMTP env
+   file, adds jitter, and runs one scrape with absolute paths. (Re-run
+   `install-schedule` if you move the venv, watchlist, or output dir.)
+2. **Prints** two ways to register the task. Run **one** of them in a **Windows**
+   terminal (cmd or PowerShell), not WSL. The distro name is auto-filled from
+   `$WSL_DISTRO_NAME`; if it shows `<your-distro>`, run `wsl -l -q` to find it.
+
+```bat
+:: Option A — schtasks (cmd.exe or PowerShell)
+schtasks /Create /TN "NextdoorWatcher" /SC MINUTE /MO 15 /F ^
+  /TR "wsl.exe -d Ubuntu -- bash /home/me/nd/data/run-watcher.sh"
+```
+
+```powershell
+# Option B — PowerShell (sub-daily repetition, survives reboots)
+$a = New-ScheduledTaskAction -Execute 'wsl.exe' -Argument '-d Ubuntu -- bash /home/me/nd/data/run-watcher.sh'
+$t = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)
+Register-ScheduledTask -TaskName 'NextdoorWatcher' -Action $a -Trigger $t
 ```
 
 Notes:
-- Minimum interval is **2 minutes**; `install-cron` rejects anything lower.
-- Use **absolute paths** — cron has a minimal PATH.
-- The `sleep $((RANDOM \% 60))` jitter keeps your traffic from looking metronomic.
+- Minimum interval is **2 minutes**; `install-schedule` rejects anything lower.
+- In Task Scheduler properties, set the task to run **whether the user is logged
+  on or not** (and to **wake the computer** if you need overnight coverage).
+- Task Scheduler's **Last Run Result** reflects the watcher's exit code (`0x0` = success).
 - Suggested intervals: 1–5 URLs → 5 min, 6–15 → 10 min, 16–30 → 15 min, 31–60 → 30 min.
+- Remove it later: `schtasks /Delete /TN "NextdoorWatcher" /F` (in Windows).
+
+> You can test exactly what the scheduler runs, from inside WSL, with:
+> `bash ./data/run-watcher.sh`
 
 ## 5. Check status
 
@@ -117,22 +141,28 @@ You must use an **app password**, not your account password:
 2. Create an app password at <https://myaccount.google.com/apppasswords>.
 3. Export it as the env var below.
 
-### Setting the env var for cron
+### Setting the env var for the scheduled run
 
-Cron does not inherit your shell environment. Pick one:
+Windows Task Scheduler launches the wrapper with a minimal environment, so the
+wrapper sources `~/.nextdoor-watcher.env` (inside WSL). Put the password there —
+this is the **only** place it should live (never in the Windows task or a
+`wsl.exe` command line, which a Windows process listing could expose):
 
 ```bash
-# (a) An env file with chmod 600, sourced by the crontab line (recommended):
-echo 'NEXTDOOR_WATCHER_SMTP_PASSWORD=your-app-password' > ~/.nextdoor-watcher.env
+# Create the env file with strict perms (run inside WSL):
+umask 077
+printf 'NEXTDOOR_WATCHER_SMTP_PASSWORD=your-app-password\n' > ~/.nextdoor-watcher.env
 chmod 600 ~/.nextdoor-watcher.env
-# crontab line:
-*/15 * * * * . ~/.nextdoor-watcher.env; nextdoor-watcher scrape --input-file /abs/wl.txt --output-dir /abs/data --quiet
-
-# (b) systemd EnvironmentFile=, if you wrap the run in a service/timer.
-
-# (c) Inline in the crontab (NOT recommended — readable by anyone with crontab access):
-NEXTDOOR_WATCHER_SMTP_PASSWORD=... 
 ```
+
+The wrapper written by `install-schedule` already begins with:
+
+```bash
+if [ -f "$HOME/.nextdoor-watcher.env" ]; then . "$HOME/.nextdoor-watcher.env"; fi
+```
+
+so the scheduled scrape picks the password up automatically. For a manual run in
+your own shell, just `export NEXTDOOR_WATCHER_SMTP_PASSWORD=...` first.
 
 ### Confirm SMTP works
 
@@ -156,7 +186,9 @@ nextdoor-watcher test-notify --output-dir ./data
 3. Run `scrape` again within the cooldown window → confirm **no** second email (look for `notification suppressed: cooldown active` in the log).
 4. Restore the session file.
 
-## 10. Cron smoke test
+## 10. Schedule smoke test
 
-Install the line from `install-cron`, wait two intervals, and confirm two new
-files appear under `data/runs/`.
+Run `install-schedule`, register the task with the emitted `schtasks`/PowerShell
+command, wait two intervals, and confirm two new files appear under
+`data/runs/` (and that Task Scheduler shows **Last Run Result** `0x0`). To dry-run
+the exact command the scheduler uses, from inside WSL: `bash ./data/run-watcher.sh`.

@@ -2,14 +2,14 @@
 
 ## 1. Overview
 
-A command-line tool that scrapes **new comments and replies** from a user-defined list of Nextdoor posts.
+A command-line tool that scrapes **new comments and replies** from a user-defined list of Nextdoor posts. It also captures the **original post** on each watched URL once (and again whenever the post body is edited) so every comment has the post it replies to for context.
 
-The tool runs as a **one-shot process**: each invocation reads the input file, polls every URL in it once, captures any new comments as screenshots, persists state, and exits. To run it on a schedule, the user installs it as a **cron job** (Linux/macOS), a **launchd plist** (macOS), or a **Scheduled Task** (Windows). The tool itself does not run a background loop.
+The tool runs as a **one-shot process**: each invocation reads the input file, polls every URL in it once, captures any new comments as screenshots, persists state, and exits. To run it on a schedule, the user registers a **Windows Task Scheduler** task that launches a WSL wrapper script via `wsl.exe` (see §14); the `install-schedule` subcommand generates both. The tool itself does not run a background loop.
 
 This makes the tool:
 - **Crash-safe** — a single bad invocation never takes down a long-running daemon.
 - **Memory-safe** — every run starts from a clean process; no leaks accumulate.
-- **Composable** — you can run it manually, on cron, or from CI without changing modes.
+- **Composable** — you can run it manually, on a schedule, or from CI without changing modes.
 - **Restart-safe** — state is fully persisted to disk between runs.
 
 The list of posts to watch is provided via an **input file** (see §6). The tool only ever scrapes URLs in that file — nothing else. New comments are saved as **screenshots** plus sidecar JSON metadata, organized per-post.
@@ -25,6 +25,7 @@ The tool uses a **persisted browser session**: the user logs into Nextdoor once 
 - Scrape a list of Nextdoor post URLs provided in an input file (re-read on every invocation).
 - Detect comments and replies that are new since the last invocation, **per post**.
 - Save a screenshot of each new comment, scoped tightly to the comment DOM element, organized in a per-post output folder.
+- Capture the **original post** once on a URL's first scrape, and re-capture it whenever its body is edited.
 - Maintain a small local index per post so the same comment is never captured twice across runs.
 - Use exit codes correctly so cron/launchd/Task Scheduler can detect failures.
 - Use a single lock file so concurrent invocations (e.g. a long run still in progress when cron fires again) don't trample each other.
@@ -35,7 +36,7 @@ The tool uses a **persisted browser session**: the user logs into Nextdoor once 
 - Watching feeds, groups, or neighborhood timelines.
 - Discovering posts automatically. The tool **only** scrapes URLs explicitly listed in the input file.
 - Modifying, replying to, or reacting to posts.
-- Scraping post bodies, reactions, or any non-comment content beyond the screenshot frame.
+- Scraping reactions, or any content beyond the comments and the single original-post capture (e.g. attachments, embedded articles, reactor lists).
 - Bypassing Nextdoor's authentication, rate limits, or terms of service. The user is responsible for ensuring their use complies with Nextdoor's ToS.
 
 ---
@@ -44,14 +45,14 @@ The tool uses a **persisted browser session**: the user logs into Nextdoor once 
 
 ```
         ┌────────────────────────────────┐
-        │  OS scheduler (cron/launchd/   │
-        │  Task Scheduler) fires every   │
-        │  X minutes                     │
+        │  Windows Task Scheduler fires  │
+        │  every X minutes →             │
+        │  wsl.exe -- bash run-watcher.sh│
         └──────────────┬─────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              nextdoor-watcher scrape (one-shot)             │
+│       run-watcher.sh → nextdoor-watcher scrape (one-shot)   │
 ├─────────────────────────────────────────────────────────────┤
 │  1. Acquire lock file (exit cleanly if already locked)      │
 │  2. Load storage_state.json   (exit if missing/expired)     │
@@ -72,7 +73,7 @@ The tool uses a **persisted browser session**: the user logs into Nextdoor once 
         └────────────────────────────────┘
 ```
 
-Other subcommands (`login`, `validate`, `status`, `install-cron`) do **not** scrape — they are administrative.
+Other subcommands (`login`, `validate`, `status`, `install-schedule`) do **not** scrape — they are administrative.
 
 ---
 
@@ -92,10 +93,10 @@ Other subcommands (`login`, `validate`, `status`, `install-cron`) do **not** scr
 ```
 nextdoor-watcher login
 nextdoor-watcher scrape       --input-file <PATH> [--output-dir DIR] [--first-run-mode MODE] [--dry-run] [--quiet]
-nextdoor-watcher validate     --input-file <PATH>
-nextdoor-watcher status       [--output-dir DIR]
-nextdoor-watcher install-cron --input-file <PATH> --every <MINUTES> [--output-dir DIR]
-nextdoor-watcher test-notify  [--output-dir DIR]
+nextdoor-watcher validate         --input-file <PATH>
+nextdoor-watcher status           [--output-dir DIR]
+nextdoor-watcher install-schedule --input-file <PATH> --every <MINUTES> [--output-dir DIR] [--task-name NAME]
+nextdoor-watcher test-notify      [--output-dir DIR]
 ```
 
 ### `login`
@@ -117,7 +118,7 @@ Optional:
   - `seed` (default) — on a URL's first scrape, record all existing comment IDs as "seen" but do **not** capture screenshots of them. Only capture comments that appear in later runs.
   - `capture-all` — capture every comment found on a URL's first scrape too.
 - `--dry-run` — perform everything except writing PNG and JSON files. Useful for testing selectors and cron wiring.
-- `--quiet` — suppress stdout; only write to the log file. Recommended for cron to keep mail volume down (or use cron's own redirection).
+- `--quiet` — suppress stdout; only write to the log file. The scheduled wrapper uses this so the task's captured output (`cron.out`) stays empty unless something really breaks.
 
 Behavior (executed exactly once per invocation — see §7 for full sequence):
 1. Acquire the lock file (see §7). If already locked, exit with code `3`.
@@ -135,7 +136,7 @@ Reads the input file and prints, for each line:
 - `SKIP` — comment, blank line.
 - `BAD`  — malformed URL or wrong host; prints the reason.
 
-Exits `0` if every non-skip line is OK, `1` otherwise. Useful before installing a cron job.
+Exits `0` if every non-skip line is OK, `1` otherwise. Useful before scheduling.
 
 ### `status`
 Prints:
@@ -145,8 +146,8 @@ Prints:
 - Session age and whether it looks expired.
 - Whether a lock file is currently held (and by which PID).
 
-### `install-cron`
-Emits a cron line for the user to paste into their crontab. **Linux only.** It does **not** modify the user's crontab directly — only prints what to add. See §14 for examples and rationale.
+### `install-schedule`
+Writes a WSL **wrapper script** (`<output-dir>/run-watcher.sh`) and prints the **Windows Task Scheduler** commands to register a recurring task that launches it via `wsl.exe`. It does **not** modify Windows itself — the user runs the printed `schtasks`/PowerShell command. Targets **WSL on Windows** (the deployment environment); a plain Linux host can run the same wrapper from cron if desired. See §14 for examples and rationale.
 
 ---
 
@@ -300,7 +301,24 @@ Then detect deletions by comparing:
 
 ### Order of capture
 
-Process captures in this order within a single URL: `new` (chronological, oldest first), then `edited`, then `deleted`. This keeps the output folder readable.
+Process captures in this order within a single URL: the **original post** (if new or edited), then `new` comments (chronological, oldest first), then `edited`, then `deleted`. This keeps the output folder readable and puts the post first.
+
+### Original post extraction & diffing
+
+In addition to comments, each scrape extracts the **original post** on the URL. The post is the first post node on the page that contains a post body — not the "more posts" feed/sidebar. As with comments, the selectors live in `selectors.py` (`post_node`, `post_body`, `post_author`, `post_timestamp`, `post_id_attributes`, `post_see_more`).
+
+Before reading or screenshotting the post, the watcher clicks the post's **"… see more"** truncation toggle (selector `post_see_more`, scoped to the main post node so it never touches the sidebar feed) and waits for it to expand. This ensures the **full** post body is captured — both in the screenshot and in the `content_hash`. Note: the first scrape after enabling this will re-capture any post previously stored in its truncated form as a one-time `edited` (truncated → full); after that the hash is stable.
+
+The post is classified independently of comments, against the post state stored in `post-meta.json` (see §12):
+
+| Class       | Condition                                                                                  |
+|-------------|--------------------------------------------------------------------------------------------|
+| `new`       | No post state recorded yet (the URL's first scrape). Captured regardless of `--first-run-mode`. |
+| `edited`    | Post state exists AND the post's `content_hash` differs from the stored one.                |
+| `unchanged` | Post state exists AND `content_hash` matches. No capture.                                   |
+| `missing`   | No post body found on the page (logged as a WARN; layout may have changed). No capture.      |
+
+The post `content_hash` uses the same normalization as comments. Unlike comments, the post is **always captured on the first scrape** (even in `seed` mode): it is a single context shot, not the comment backlog that `seed` exists to suppress. Deletions are **not** tracked for the post (if the post is gone the whole URL stops resolving).
 
 ---
 
@@ -308,12 +326,13 @@ Process captures in this order within a single URL: `new` (chronological, oldest
 
 ### Capture behavior by class
 
-| Class      | Action                                                                                                                                  |
-|------------|-----------------------------------------------------------------------------------------------------------------------------------------|
-| `new`      | Take an element-scoped PNG of the comment, including its **avatar**. Write a sidecar JSON. Add a new entry to `seen.json`.              |
-| `edited`   | Take a fresh element-scoped PNG of the comment in its current (edited) state. Write a sidecar JSON. Update the entry in `seen.json` with the new `content_hash` and append a revision record. |
-| `deleted`  | Do **not** take a screenshot (the comment is gone from the page). Write a sidecar JSON noting the deletion. Update the entry in `seen.json` to `status: "deleted"`.  |
-| `unchanged`| Do nothing.                                                                                                                             |
+| Class       | Action                                                                                                                                  |
+|-------------|-----------------------------------------------------------------------------------------------------------------------------------------|
+| `new`       | Take an element-scoped PNG of the comment, including its **avatar**. Write a sidecar JSON. Add a new entry to `seen.json`.              |
+| `edited`    | Take a fresh element-scoped PNG of the comment in its current (edited) state. Write a sidecar JSON. Update the entry in `seen.json` with the new `content_hash` and append a revision record. |
+| `deleted`   | Do **not** take a screenshot (the comment is gone from the page). Write a sidecar JSON noting the deletion. Update the entry in `seen.json` to `status: "deleted"`.  |
+| `unchanged` | Do nothing.                                                                                                                             |
+| post `new`/`edited` | Take an element-scoped PNG of the original post node (avatar + author + body). Write a sidecar JSON with `"is_post": true`. Update the `post` entry in `post-meta.json` and append a revision. Uses the pseudo comment id `post`. |
 
 ### Screenshot mechanics (for `new` and `edited`)
 
@@ -333,6 +352,8 @@ Examples:
 - `2026-05-21T14-32-10Z__c_aaa__new.png`
 - `2026-05-22T09-15-00Z__c_aaa__edited.png`        ← same comment, later edit
 - `2026-05-23T11-00-00Z__c_aaa__deleted.json`      ← deletion, JSON only
+- `2026-05-21T14-32-10Z__post__new.png`            ← the original post, captured once
+- `2026-05-25T08-00-00Z__post__edited.png`         ← post body later edited
 
 This makes the full history of any one comment trivially findable by globbing `*__c_aaa__*`.
 
@@ -348,6 +369,8 @@ Each watched URL gets its own folder, named by a deterministic **post slug** der
 │   │   ├── post-meta.json           # url, first_seen_at, last_scrape_at, totals
 │   │   ├── seen.json                # comment ID → status + content_hash (see §12)
 │   │   └── captures/
+│   │       ├── 2026-05-21T14-00-00Z__post__new.png     # the original post
+│   │       ├── 2026-05-21T14-00-00Z__post__new.json
 │   │       ├── 2026-05-21T14-32-10Z__c_aaa__new.png
 │   │       ├── 2026-05-21T14-32-10Z__c_aaa__new.json
 │   │       ├── 2026-05-22T09-15-00Z__c_aaa__edited.png
@@ -406,6 +429,11 @@ Class-specific additions:
   "first_missing_at": "2026-05-23T05:00:00Z",
   "confirmed_deleted_at": "2026-05-23T11:00:00Z"
   ```
+- **the original post** (`class: "new"` or `"edited"`) — `comment_id` is the literal `"post"`, `id_source` is `"post"`, and it adds:
+  ```json
+  "is_post": true,
+  "post_id": "s_479470223"
+  ```
 
 ---
 
@@ -431,9 +459,9 @@ If logged out:
 
 ## 11. Rate Limiting, Politeness & Resilience
 
-- **Minimum scheduling interval:** 2 minutes. The `install-cron` helper rejects anything lower; users who hand-write their crontab can shoot themselves in the foot at their own risk.
+- **Minimum scheduling interval:** 2 minutes. The `install-schedule` helper rejects anything lower; users who hand-write their own task can shoot themselves in the foot at their own risk.
 - **Per-URL pause:** between consecutive URLs within a single invocation, sleep for a randomized 5–15 seconds. This avoids hammering Nextdoor with a burst of `goto`s and keeps the traffic shape more human.
-- **Schedule jitter:** the `install-cron` helper emits a cron line that uses a small random offset within the chosen interval (or, equivalently, advises adding a `sleep $((RANDOM \% 60))` prefix). Avoids making your traffic look exactly metronomic.
+- **Schedule jitter:** the generated wrapper script begins with `sleep $((RANDOM % 60))` so runs don't fire at exactly the same second every interval. Avoids making your traffic look metronomic.
 - **Realistic browser fingerprint:** use Playwright's default Chromium; do **not** set obvious automation flags. Set a normal desktop viewport (e.g. 1440×900) and a real `User-Agent`.
 - **Backoff on transient failures (within an invocation):** on network errors, timeouts, or HTTP 5xx for a given URL, retry with exponential backoff (e.g. 30s, 60s, 120s, max 3 attempts) before giving up on that URL for this invocation. A failed URL does not abort the rest of the run.
 - **Hard stop on auth failure:** as in §10, the invocation exits `2`. No retry storms against the login page.
@@ -475,9 +503,22 @@ Updated at the end of every invocation.
   "total_seen": 47,
   "total_currently_live": 45,
   "total_edited_ever": 3,
-  "total_deleted_ever": 2
+  "total_deleted_ever": 2,
+  "post": {
+    "id_source": "post",
+    "post_node_id": "s_479470223",
+    "first_seen_at": "2026-05-21T14:00:00Z",
+    "last_seen_at": "2026-05-21T14:30:05Z",
+    "current_content_hash": "9549...",
+    "current_body_text": "Neighbors and friends of Sausalito, ...",
+    "revisions": [
+      {"observed_at": "2026-05-21T14:00:00Z", "run_id": "...", "class": "new", "content_hash": "9549...", "body_text": "...", "screenshot": "captures/2026-05-21T14-00-00Z__post__new.png"}
+    ]
+  }
 }
 ```
+
+The `post` key tracks the original post the same way a `seen.json` entry tracks a comment: a current `content_hash`/`body_text` plus a revision history. It is absent until the first successful scrape captures the post.
 
 ### Per-post `posts/<slug>/seen.json`
 
@@ -565,36 +606,72 @@ A small audit record per invocation. Kept for 90 days, then pruned during normal
 - One **invocation end** line: `2026-05-21T14:31:18Z run end run_id=... new=5 edited=1 deleted=0 took=73s exit=0`.
 - WARN for transient failures and retries, stale-lock recoveries, and invalid lines in the input file.
 - ERROR for fatal conditions (auth, unrecoverable Playwright crash, input file unreadable).
-- Stdout mirrors the same lines unless `--quiet` is passed. Cron normally emails stdout, so `--quiet` is the recommended way to keep cron mail signal-only.
+- Stdout mirrors the same lines unless `--quiet` is passed. The scheduled wrapper runs with `--quiet` and redirects stdout/stderr to `cron.out`, so that file stays empty unless a real error escapes — the rich record lives in `watcher.log`.
 
 ---
 
-## 14. Scheduling (cron, Linux)
+## 14. Scheduling (WSL + Windows Task Scheduler)
 
-The tool does not schedule itself. On Linux, install it as a cron job. Other platforms are out of scope for this version.
+The tool does not schedule itself. The target deployment is **WSL on Windows**, where there is no reliable always-on cron (the WSL `cron` daemon only runs while a WSL session is open). Scheduling is therefore owned by **Windows Task Scheduler**, which is always running and launches the watcher inside WSL via `wsl.exe`. A plain Linux host can run the same wrapper script from cron if desired, but that is not the supported path.
 
-### Cron line
+### Architecture
 
-Every 15 minutes, log to a rolling file:
-
-```cron
-*/15 * * * * cd /home/me/nextdoor && /usr/local/bin/nextdoor-watcher scrape \
-    --input-file ./watchlist.txt \
-    --output-dir  ./data \
-    --quiet \
-    >> ./data/logs/cron.out 2>&1
+```
+Windows Task Scheduler (every X min)
+        │   runs:  wsl.exe -d <distro> -- bash <output-dir>/run-watcher.sh
+        ▼
+WSL: run-watcher.sh  ──►  sources ~/.nextdoor-watcher.env  ──►  nextdoor-watcher scrape (one-shot)
 ```
 
-The `install-cron` subcommand prints exactly this line (parameterized by your `--input-file`, `--every`, and `--output-dir`) so you can paste it into `crontab -e`.
+The wrapper script keeps all the WSL-side concerns (the venv interpreter, absolute paths, the SMTP env file, jitter, output redirection) in one place, so the Windows task is a single stable command that never changes when those details do.
+
+### The wrapper script
+
+`install-schedule` writes `<output-dir>/run-watcher.sh` (mode `0755`):
+
+```bash
+#!/usr/bin/env bash
+# Generated by `nextdoor-watcher install-schedule`. Runs ONE scrape inside WSL.
+
+if [ -f "$HOME/.nextdoor-watcher.env" ]; then
+    . "$HOME/.nextdoor-watcher.env"        # SMTP password, etc.
+fi
+
+sleep $((RANDOM % 60))                      # jitter, so traffic isn't metronomic
+
+exec /abs/venv/bin/nextdoor-watcher --config /abs/nextdoor-watcher.toml scrape \
+    --input-file /abs/watchlist.txt \
+    --output-dir /abs/data \
+    --quiet >> /abs/data/logs/cron.out 2>&1
+```
+
+`exec` is used so the watcher's exit code becomes the script's exit code, which Windows Task Scheduler surfaces as the task's **Last Run Result**.
+
+### Registering the task on Windows
+
+`install-schedule` prints two ways to register it (run in a **Windows** terminal, not WSL — the distro name is auto-filled from `$WSL_DISTRO_NAME`, or run `wsl -l -q` to find it):
+
+```bat
+:: Option A — schtasks (cmd.exe or PowerShell)
+schtasks /Create /TN "NextdoorWatcher" /SC MINUTE /MO 15 /F ^
+  /TR "wsl.exe -d Ubuntu -- bash /home/me/nd/data/run-watcher.sh"
+```
+
+```powershell
+# Option B — PowerShell (sub-daily repetition, survives reboots)
+$a = New-ScheduledTaskAction -Execute 'wsl.exe' -Argument '-d Ubuntu -- bash /home/me/nd/data/run-watcher.sh'
+$t = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 15)
+Register-ScheduledTask -TaskName 'NextdoorWatcher' -Action $a -Trigger $t
+```
+
+Remove it later with `schtasks /Delete /TN "NextdoorWatcher" /F`.
 
 ### Recommended hardening
 
-- Use **absolute paths** for the binary, input file, and output dir. Cron has a minimal `PATH`.
-- Set `MAILTO=you@example.com` at the top of the crontab so non-zero exits trigger email.
-- Wrap the command in `flock` for belt-and-suspenders concurrency safety on top of the tool's own lock:
-  ```cron
-  */15 * * * * flock -n /tmp/nextdoor.flock -c '/usr/local/bin/nextdoor-watcher scrape --input-file /home/me/nextdoor/watchlist.txt --output-dir /home/me/nextdoor/data --quiet'
-  ```
+- The wrapper already uses **absolute paths** for everything; Task Scheduler launches WSL with a minimal environment.
+- Keep the SMTP password in `~/.nextdoor-watcher.env` (`chmod 600`) — the wrapper sources it. Do not put secrets in the Windows task definition.
+- Set the task to run **whether the user is logged on or not**, and to **wake the machine** if you need overnight coverage (Task Scheduler GUI → task properties).
+- The tool's own lock file plus `--quiet` keep concurrent or overlapping runs safe and quiet.
 
 ### Choosing an interval
 
@@ -609,9 +686,9 @@ Rule of thumb: a single URL scrape takes roughly 5–20s including the polite pa
 
 ### Monitoring
 
-The cron job's stderr/stdout file is your first line of defense. The watcher also includes a built-in SMTP email notifier for hard failures — see §15. For more sophisticated monitoring, the user can additionally:
+The wrapper's `cron.out` redirect file and the rotating `watcher.log` are your first line of defense, and Task Scheduler's **Last Run Result** reflects the exit code. The watcher also includes a built-in SMTP email notifier for hard failures — see §15. For more sophisticated monitoring, the user can additionally:
 - Periodically check `nextdoor-watcher status` to confirm everything is healthy.
-- Wire the cron job into an external monitor (e.g. healthchecks.io ping on success).
+- Wire the wrapper into an external monitor (e.g. a healthchecks.io ping on success).
 
 ---
 
@@ -634,7 +711,7 @@ In addition, a notification is sent if the watcher has had **N consecutive non-`
 
 ### Cooldown / throttling
 
-A cron job that fires every 15 minutes will produce 96 emails per day if a session expires overnight. To prevent that:
+A scheduled task that fires every 15 minutes will produce 96 emails per day if a session expires overnight. To prevent that:
 
 - Each distinct **failure class** (one of `bad_input`, `auth`, `partial`, `runtime`) has its own cooldown timer, default **6 hours**, configurable per class.
 - If an email for that class was sent within the cooldown window, the current invocation **does not send another email** but does log `notification suppressed: cooldown active, last_sent=... class=...`.
@@ -749,8 +826,8 @@ Output on stdout: `sent test email to you@example.com, ops@example.com` (exit `0
 ### Security notes
 
 - The config file path and the env var name are not secrets, but the env var **value** is. Document in the README:
-  - Set the env var in the cron environment via `~/.profile`, a systemd `EnvironmentFile`, or by inlining it in the crontab line: `NEXTDOOR_WATCHER_SMTP_PASSWORD=… */15 * * * * …`.
-  - Inlining in crontab is **not recommended** — anyone who can read `/var/spool/cron/crontabs/<user>` will see it. Prefer an env file with `chmod 600`.
+  - The generated wrapper script sources `~/.nextdoor-watcher.env`, so put `NEXTDOOR_WATCHER_SMTP_PASSWORD=…` in that file (`chmod 600`). This keeps the secret out of the Windows task definition and out of `wsl.exe` command lines.
+  - Do **not** put the password in the Windows Task Scheduler action or anywhere a Windows process listing could surface it. The env file inside WSL is the only place it belongs.
 - For Gmail / Google Workspace, the password must be an **app password**, not the account password. Document this in `EXAMPLES.md`.
 - `notifications-state.json` is not sensitive (timestamps only) but should still live inside `<output-dir>/`.
 
@@ -848,7 +925,7 @@ The implementer must deliver:
    3. Edits that comment from the second account → next `scrape` captures it as `edited`.
    4. Deletes the comment → next two `scrape` runs confirm it as `deleted`.
 7. **Notifications smoke test** (manual): set `notify.enabled = true`, set the env var, run `nextdoor-watcher test-notify`, confirm receipt. Then intentionally rename `storage_state.json` and run `scrape` — confirm exactly one `auth` failure email arrives and that a second `scrape` within the cooldown window does **not** trigger a second email.
-8. **Cron smoke test** (manual, Linux): install the cron line emitted by `install-cron`, wait two intervals, and confirm two run-summary files appear under `runs/`.
+8. **Schedule smoke test** (manual, Windows + WSL): run `install-schedule`, register the task with the emitted `schtasks`/PowerShell command, wait two intervals, and confirm two run-summary files appear under `runs/` (and that Task Scheduler shows Last Run Result `0x0`).
 9. **A `--dry-run` flag on `scrape`** that performs everything except writing PNG and JSON files — useful for testing selectors and cron wiring without polluting the output dir.
 
 ---
@@ -858,7 +935,7 @@ The implementer must deliver:
 - Source code in a single repo with a clear `README.md`.
 - `requirements.txt` / `package.json` pinning Playwright version.
 - A `playwright install chromium` step documented in setup.
-- An `EXAMPLES.md` showing the canonical workflows: `login`, `validate`, `scrape` (manual), installing the cron job, `status`, adding/removing URLs between runs, and configuring SMTP notifications (including the Gmail app-password caveat and how to set the `NEXTDOOR_WATCHER_SMTP_PASSWORD` env var for a cron environment).
+- An `EXAMPLES.md` showing the canonical workflows: `login`, `validate`, `scrape` (manual), scheduling via `install-schedule` + Windows Task Scheduler, `status`, adding/removing URLs between runs, and configuring SMTP notifications (including the Gmail app-password caveat and how to set the `NEXTDOOR_WATCHER_SMTP_PASSWORD` env var via the WSL env file the wrapper sources).
 - A `SELECTORS.md` explaining how to update CSS selectors when Nextdoor's DOM changes — including which Chrome DevTools steps to use to find the new ones.
 - A sample `watchlist.txt` in the repo.
 - A sample `nextdoor-watcher.toml` covering the SMTP block.
@@ -874,5 +951,6 @@ The following decisions are locked in for this version:
 2. **Edits are captured.** A change in a comment's normalized body text (detected via `content_hash` change) produces a new `edited` PNG + JSON pair and a revision entry in `seen.json`.
 3. **Deletions are tracked.** A comment missing on two consecutive scrapes transitions to `status: "deleted"` in `seen.json`. A JSON-only "deleted" sidecar is written (no PNG, since the comment is gone). No automatic resurrection.
 4. **Image format: PNG only.** No JPEG, no WebP.
-5. **`install-cron` is Linux only and print-only.** It emits a cron line for the user to paste; it does not modify the crontab itself. macOS and Windows are out of scope for this version.
+5. **`install-schedule` targets WSL on Windows and is generate-and-print.** It writes the WSL wrapper script (`run-watcher.sh`) and prints the Windows Task Scheduler commands (`schtasks` and PowerShell) for the user to run; it does not modify Windows itself. The same wrapper can be driven by cron on a plain Linux host, but that is not the supported deployment.
 6. **Run summaries are pruned implicitly at 90 days.** No dedicated `prune` subcommand — pruning happens at the start of normal `scrape` runs.
+7. **The original post is captured.** On a URL's first scrape the original post is screenshotted once (class `new`), regardless of `--first-run-mode`, and re-captured (class `edited`) whenever its body changes. State lives under the `post` key of `post-meta.json`; the capture uses the pseudo comment id `post` and its sidecar carries `"is_post": true`. The post is not subject to deletion tracking.

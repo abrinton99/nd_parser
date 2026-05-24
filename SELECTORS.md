@@ -26,6 +26,10 @@ the front of the relevant list; keep the old ones as fallbacks.
 | `comment_edited_marker` | The "Edited" marker, if shown. |
 | `comment_permalink` | An anchor whose `?comment=<id>` is the 2nd-choice comment id. |
 | `comment_id_attributes` | DOM attributes inspected (in order) for the 1st-choice stable id. |
+| `post_node` | The original post's node (first card containing a post body — not the "more posts" feed). `:has()` is allowed here. |
+| `post_body` / `post_author` / `post_timestamp` | The original post's body text, author, and timestamp. |
+| `post_see_more` | The "… see more" truncation toggle inside the post body, clicked (scoped to the main post) before capture so the full body is screenshotted. |
+| `post_id_attributes` | DOM attributes inspected (in order) for the post's stable id. |
 | `logged_in_signal` | An element present only when logged in (e.g. the comment composer). |
 | `logged_out_signal` | An element present only when logged out (e.g. a "Sign up" banner). |
 

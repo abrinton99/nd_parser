@@ -57,6 +57,40 @@ SELECTORS: dict[str, object] = {
     "comment_edited_marker": [
         '[data-testid="edited-marker"]',
     ],
+    # ---- The original post (spec §8a / §9a) --------------------------------
+    # The main post is the first feed-item-card that contains a post body; the
+    # rest of the feed-item-cards on the page are the "more posts" sidebar.
+    # `:has()` is valid CSS (soupsieve + Playwright both support it) — unlike
+    # `:has-text()`, which is Playwright-only.
+    "post_node": [
+        '[data-testid="feed-item-card"]:has([data-testid="post-body"])',
+        '[id^="feedItem_"]:has([data-testid="post-body"])',
+        '[data-testid="post-body"]',
+    ],
+    "post_body": [
+        '[data-testid="post-body"]',
+    ],
+    # The "… see more" truncation toggle inside a post body. Clicked (scoped to
+    # the main post node) before capture so the full body is screenshotted.
+    "post_see_more": [
+        "[data-post-see-more]",
+        'span:has-text("see more")',
+    ],
+    "post_author": [
+        'a[href*="/profile/"]',
+        '[data-testid="author-test"]',
+    ],
+    "post_timestamp": [
+        '[data-testid="post-timestamp"]',
+        "time",
+    ],
+    "post_edited_marker": [
+        '[data-testid="edited-marker"]',
+    ],
+    "post_id_attributes": [
+        "id",
+        "data-post-id",
+    ],
     # Permalink anchor whose ?comment=<id> fragment is the 2nd-choice id source.
     "comment_permalink": [
         'a[href*="comment="]',

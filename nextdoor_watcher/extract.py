@@ -23,6 +23,18 @@ from .util import content_hash, fallback_comment_id
 
 
 @dataclass
+class ExtractedPost:
+    """The original post on a watched URL (distinct from its comments)."""
+
+    content_hash: str
+    body_text: str
+    author_display_name: str | None = None
+    timestamp_text: str | None = None
+    edited_marker_text: str | None = None
+    post_node_id: str | None = None
+
+
+@dataclass
 class ExtractedComment:
     comment_id: str
     id_source: str            # "dom" | "permalink" | "hash"
@@ -148,6 +160,47 @@ def extract_from_html(html: str) -> list[ExtractedComment]:
         comments.append(c)
 
     return comments
+
+
+def _derive_post_id(node: Tag) -> str | None:
+    for attr in sel.candidates("post_id_attributes"):
+        val = node.get(attr)
+        if val:
+            return str(val)
+    return None
+
+
+def extract_post_from_html(html: str) -> ExtractedPost | None:
+    """Extract the original post (body, author, timestamp) from page HTML.
+
+    Returns None if no post body is found. The first `post_node` candidate that
+    matches wins — on a post page that is the main post, not the sidebar feed.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    node: Tag | None = None
+    for css in _css_only("post_node"):
+        try:
+            node = soup.select_one(css)
+        except Exception:
+            node = None
+        if node is not None:
+            break
+    if node is None:
+        return None
+
+    body_text = _first_text(node, "post_body") or ""
+    if not body_text:
+        return None
+
+    return ExtractedPost(
+        content_hash=content_hash(body_text),
+        body_text=body_text,
+        author_display_name=_first_text(node, "post_author"),
+        timestamp_text=_first_text(node, "post_timestamp"),
+        edited_marker_text=_first_text(node, "post_edited_marker"),
+        post_node_id=_derive_post_id(node),
+    )
 
 
 def _enclosing_comment(node: Tag, node_set: set[int]) -> Tag | None:

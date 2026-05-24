@@ -10,7 +10,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 
-from .extract import ExtractedComment
+from .extract import ExtractedComment, ExtractedPost
 from .util import capture_basename
 
 
@@ -22,6 +22,8 @@ class Action:
     comment_id: str
     comment: ExtractedComment | None = None   # present for new/edited
     screenshot_rel: str | None = None         # captures/<base>.png, None for deleted
+    is_post: bool = False                     # True for the original-post capture
+    post_node_id: str | None = None           # the post's DOM id, when is_post
     # edited extras
     previous_content_hash: str | None = None
     previous_body_text: str | None = None
@@ -215,3 +217,80 @@ def diff(
     res.edited_count = len(edited_actions)
     res.deleted_count = len(deleted_actions)
     return res
+
+
+def _post_as_comment(post: ExtractedPost) -> ExtractedComment:
+    """Adapt an ExtractedPost to the comment shape the capture pipeline expects."""
+    return ExtractedComment(
+        comment_id="post",
+        id_source="post",
+        content_hash=post.content_hash,
+        body_text=post.body_text,
+        author_display_name=post.author_display_name,
+        timestamp_text=post.timestamp_text,
+        edited_marker_text=post.edited_marker_text,
+        is_reply=False,
+        parent_comment_id=None,
+    )
+
+
+def diff_post(
+    post: ExtractedPost | None,
+    post_state: dict | None,
+    *,
+    run_id: str,
+    observed_at: str,
+) -> tuple[Action | None, dict | None, str]:
+    """Classify the original post: capture once on first scrape, then on edits.
+
+    Returns (action_or_None, next_post_state, class). `class` is one of
+    "new", "edited", "unchanged", or "missing" (post not found on the page).
+    Unlike comments, the post is captured on the first scrape regardless of
+    --first-run-mode (it is a single context shot, not the comment backlog).
+    """
+    if post is None:
+        return None, post_state, "missing"
+
+    if post_state is not None and post_state.get("current_content_hash") == post.content_hash:
+        ns = dict(post_state)
+        ns["last_seen_at"] = observed_at
+        return None, ns, "unchanged"
+
+    cls = "new" if post_state is None else "edited"
+    screenshot = f"captures/{capture_basename(run_id, 'post', cls)}.png"
+
+    prev_hash = prev_body = prev_observed = None
+    if post_state is None:
+        ns = {
+            "id_source": "post",
+            "post_node_id": post.post_node_id,
+            "first_seen_at": observed_at,
+            "last_seen_at": observed_at,
+            "current_content_hash": post.content_hash,
+            "current_body_text": post.body_text,
+            "revisions": [],
+        }
+    else:
+        ns = copy.deepcopy(post_state)
+        prev_hash = ns.get("current_content_hash")
+        prev_body = ns.get("current_body_text")
+        prev_observed = ns["revisions"][-1]["observed_at"] if ns.get("revisions") else None
+        ns["last_seen_at"] = observed_at
+        ns["current_content_hash"] = post.content_hash
+        ns["current_body_text"] = post.body_text
+        if post.post_node_id:
+            ns["post_node_id"] = post.post_node_id
+
+    ns.setdefault("revisions", []).append(
+        _new_revision(observed_at, run_id, cls, post.content_hash, post.body_text, screenshot)
+    )
+
+    action = Action(
+        cls=cls, comment_id="post", comment=_post_as_comment(post),
+        screenshot_rel=screenshot, is_post=True, post_node_id=post.post_node_id,
+    )
+    if cls == "edited":
+        action.previous_content_hash = prev_hash
+        action.previous_body_text = prev_body
+        action.previous_observed_at = prev_observed
+    return action, ns, cls
