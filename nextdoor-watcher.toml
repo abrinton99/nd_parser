@@ -1,0 +1,36 @@
+# Sample nextdoor-watcher configuration.
+# CLI flags override any value set here. The SMTP password is NEVER stored
+# here — only the name of the environment variable that holds it.
+
+input_file     = "./watchlist.txt"
+output_dir     = "./data"
+first_run_mode = "capture-all"          # "seed" or "capture-all"
+quiet          = false
+
+# ---------------------------------------------------------------------------
+# Notification settings (SMTP email on hard failures) — see spec §15.
+# Remove or set enabled=false to disable all notification logic.
+# ---------------------------------------------------------------------------
+[notify]
+enabled                       = true
+to                            = ["adrian@brinton.to"]
+from                          = "watcher@sonic.net"
+subject_prefix                = "[nextdoor-watcher]"
+send_recovery                 = true
+consecutive_failure_threshold = 3
+
+[notify.smtp]
+host            = "smtp.sonic.net"
+port            = 587
+username        = "abrinton@sonic.net"
+# Name of the env var holding the password. The value itself is never in this file.
+password_env    = "NEXTDOOR_WATCHER_SMTP_PASSWORD"
+use_starttls    = true
+use_ssl         = false
+timeout_seconds = 15
+
+[notify.cooldown_hours]
+auth      = 6
+bad_input = 6
+partial   = 1
+runtime   = 6

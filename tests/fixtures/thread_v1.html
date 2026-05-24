@@ -1,0 +1,35 @@
+<!--
+  Sanitized snapshot of a Nextdoor post's comment region (May 2026 structure).
+  Each comment is a <div id="comment_NNN"> wrapper carrying the stable id, an
+  empty-text avatar profile anchor, a name profile anchor, a relative-time span,
+  and a [data-testid="comment-detail-body"]. Replies nest as inner comment_ divs.
+  Mirrors the selectors in nextdoor_watcher/selectors.py — update both together
+  when you re-capture a live page.
+-->
+<html>
+  <body>
+    <main>
+      <div data-testid="comment-reply-prompt"></div>
+      <div data-testid="comment-list">
+        <div id="comment_aaa">
+          <a href="/profile/avatar1"><img alt="avatar"></a>
+          <a href="/profile/jane?is=feed_commenter">Jane D.</a>
+          <span>5m</span>
+          <div data-testid="comment-detail-body">We should petition the city about the new development.</div>
+          <div id="comment_aaa_r1">
+            <a href="/profile/avatar2"><img alt="avatar"></a>
+            <a href="/profile/bob?is=feed_commenter">Bob K.</a>
+            <span>3m</span>
+            <div data-testid="comment-detail-body">Agreed, I'll sign it.</div>
+          </div>
+        </div>
+        <div id="comment_bbb">
+          <a href="/profile/avatar3"><img alt="avatar"></a>
+          <a href="/profile/sam?is=feed_commenter">Sam P.</a>
+          <span>1m</span>
+          <div data-testid="comment-detail-body">Where do we sign?</div>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>

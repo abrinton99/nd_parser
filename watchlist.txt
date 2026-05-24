@@ -1,0 +1,6 @@
+# Sample watchlist — one Nextdoor post URL per line.
+# Lines starting with '#' and blank lines are ignored.
+
+# Active threads — May 2026
+https://nextdoor.com/p/Q-Zh53rkkW9Q/c/1607735160
+https://nextdoor.com/p/Qdmb-bfbssGf/c/1608760616
