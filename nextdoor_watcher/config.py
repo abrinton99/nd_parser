@@ -59,15 +59,27 @@ class Config:
     first_run_mode: str = DEFAULT_FIRST_RUN_MODE
     quiet: bool = False
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    # Absolute path of the loaded config file, if any. Used to anchor the session
+    # directory so it resolves regardless of the current working directory
+    # (e.g. when launched by Windows Task Scheduler from a different cwd).
+    config_path: str | None = None
 
     @property
     def output_path(self) -> Path:
         return Path(self.output_dir)
 
     @property
+    def base_dir(self) -> Path:
+        """Directory the session is anchored to: the config file's directory when
+        a config file was loaded, otherwise the current working directory."""
+        if self.config_path:
+            return Path(self.config_path).resolve().parent
+        return Path.cwd()
+
+    @property
     def session_dir(self) -> Path:
-        # Session is stored alongside the project, not in the output dir (spec §10).
-        return Path("./session")
+        # Session lives in <base_dir>/session (spec §10), not the output dir.
+        return self.base_dir / "session"
 
     @property
     def storage_state_path(self) -> Path:
@@ -124,6 +136,7 @@ def load_config(
 
     path = Path(config_path) if config_path else Path("./nextdoor-watcher.toml")
     if path.exists():
+        cfg.config_path = str(path.resolve())
         raw = _load_toml(path)
         cfg.input_file = raw.get("input_file", cfg.input_file)
         cfg.output_dir = raw.get("output_dir", cfg.output_dir)
