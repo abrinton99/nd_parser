@@ -155,41 +155,16 @@ def wait_for_post_loaded(page, *, timeout_ms: int = 20000) -> None:
         pass
 
 
-def expand_all_comments(page) -> None:
-    """Click every 'show more' / 'view replies' button until none remain,
-    scrolling to coax virtualized content. Capped to avoid infinite loops."""
-    for _ in range(MAX_EXPAND_ITERATIONS):
-        clicked = False
-        for css in sel.candidates("expand_buttons"):
-            try:
-                buttons = page.locator(css)
-                count = buttons.count()
-            except Exception:
-                continue
-            for i in range(count):
-                btn = buttons.nth(i)
-                try:
-                    if btn.is_visible():
-                        btn.click(timeout=2000)
-                        clicked = True
-                        page.wait_for_timeout(300)
-                except Exception:
-                    continue
-        try:
-            page.mouse.wheel(0, 4000)
-            page.wait_for_timeout(300)
-        except Exception:
-            pass
-        if not clicked:
-            break
+def _main_post_locator(page):
+    """The feed-item-card for the post being watched (first `post_node` match).
 
-
-def _best_node_locator(page):
-    """First comment-node candidate that matches anything (alternatives, not a
-    union) — mirrors extract_from_html so both agree on what a comment is."""
-    for css in (c for c in sel.candidates("comment_node") if ":has-text(" not in c):
+    A /p/<id> URL renders a feed: the watched post on top, then a stream of
+    unrelated recommended posts. Comment work is scoped to this node so we never
+    pick up the recommended posts' comments (and never chase the infinite feed).
+    """
+    for css in (c for c in sel.candidates("post_node") if ":has-text(" not in c):
         try:
-            loc = page.locator(css)
+            loc = page.locator(css).first
             if loc.count() > 0:
                 return loc
         except Exception:
@@ -197,18 +172,133 @@ def _best_node_locator(page):
     return None
 
 
+def _best_node_locator(root):
+    """First comment-node candidate that matches anything within `root` (a page
+    or a locator) — mirrors extract_from_html so both agree on what a comment is.
+    """
+    for css in (c for c in sel.candidates("comment_node") if ":has-text(" not in c):
+        try:
+            loc = root.locator(css)
+            if loc.count() > 0:
+                return loc
+        except Exception:
+            continue
+    return None
+
+
+def _scoped_node_count(root) -> int:
+    loc = _best_node_locator(root)
+    try:
+        return loc.count() if loc is not None else 0
+    except Exception:
+        return 0
+
+
+def _open_comments(scope) -> None:
+    """Click the post's comment toggle so its collapsed comments render inline.
+
+    Only clicks when nothing is showing yet — the toggle flips visibility, so a
+    click on an already-open thread would hide it. No-op if comments are present
+    or the toggle can't be found.
+    """
+    if scope is None or _scoped_node_count(scope) > 0:
+        return
+    page = scope.page
+    for css in sel.candidates("comment_expand_toggle"):
+        try:
+            btn = scope.locator(css).first
+            if btn.count() == 0 or not btn.is_visible():
+                continue
+            btn.click(timeout=2000)
+            page.wait_for_timeout(600)
+            if _scoped_node_count(scope) > 0:
+                return
+        except Exception:
+            continue
+
+
+def _click_expand_buttons(root) -> bool:
+    """Click any visible 'show more comments / replies' buttons within `root`.
+    Returns True if at least one was clicked."""
+    clicked = False
+    for css in sel.candidates("expand_buttons"):
+        try:
+            buttons = root.locator(css)
+            count = buttons.count()
+        except Exception:
+            continue
+        for i in range(count):
+            btn = buttons.nth(i)
+            try:
+                if btn.is_visible():
+                    btn.click(timeout=2000)
+                    clicked = True
+                    root.page.wait_for_timeout(300)
+            except Exception:
+                continue
+    return clicked
+
+
+def expand_all_comments(page) -> None:
+    """Reveal all of the watched post's comments, scoped to its node.
+
+    Opens the (often collapsed) comment thread, then clicks 'show more' buttons
+    and scrolls the post's tail into view until the comment count stops growing.
+    Scrolling is anchored to the post node — not free page scroll — so we coax
+    the post's own lazy-loaded comments without dragging in the recommended-post
+    feed below.
+    """
+    scope = _main_post_locator(page)
+    root = scope if scope is not None else page
+    _open_comments(scope)
+
+    last_count = -1
+    stable_rounds = 0
+    for _ in range(MAX_EXPAND_ITERATIONS):
+        clicked = _click_expand_buttons(root)
+        try:
+            if scope is not None:
+                # Bring the post's growing tail into view to trigger lazy loads,
+                # keeping the viewport on the post rather than the feed.
+                scope.evaluate("el => el.scrollIntoView({block: 'end'})")
+            else:
+                page.mouse.wheel(0, 2000)
+            page.wait_for_timeout(350)
+        except Exception:
+            pass
+
+        count = _scoped_node_count(root)
+        grew = count > last_count
+        last_count = count
+        stable_rounds = 0 if (clicked or grew) else stable_rounds + 1
+        if stable_rounds >= 2:
+            break
+
+
 def extract_live(page) -> tuple[list[ExtractedComment], dict]:
     """Extract comments from the live page and return them alongside a map of
     comment_id -> Playwright element handle (for screenshots).
 
-    The authoritative comment list (with reply nesting) comes from parsing the
-    container HTML; handles are matched back by re-deriving each node's id.
+    Extraction is scoped to the watched post's node (see `_main_post_locator`) so
+    only its comments are parsed. The authoritative list (with reply nesting)
+    comes from parsing the node's HTML; handles are matched back by re-deriving
+    each node's id.
     """
-    container_html = _container_html(page)
+    scope = _main_post_locator(page)
+    if scope is not None:
+        try:
+            container_html = scope.evaluate("el => el.outerHTML")
+        except Exception:
+            container_html = _container_html(page)
+        node_root = scope
+    else:
+        container_html = _container_html(page)
+        node_root = page
+
     comments = extract_from_html(container_html)
 
     handles: dict = {}
-    locator = _best_node_locator(page)
+    locator = _best_node_locator(node_root)
     if locator is not None:
         try:
             count = locator.count()

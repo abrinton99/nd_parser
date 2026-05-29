@@ -31,8 +31,22 @@ SELECTORS: dict[str, object] = {
         '[data-testid="comment-detail"]',
         "article[data-comment-id]",
     ],
+    # The post's own "Comment" control. On a /p/ feed view the post's comments
+    # are collapsed behind this button (its text is the comment count) and are
+    # absent from the DOM until it's clicked; clicking renders them inline inside
+    # the post node. Scoped to the main post node, clicked once, and only when no
+    # comments are already showing (a second click would collapse them again).
+    "comment_expand_toggle": [
+        '[data-testid="post-reply-button"]',
+        '[aria-label="Comment"]',
+    ],
     # Buttons that reveal more comments / replies. Clicked until none remain.
+    # `seeMoreButton` is Nextdoor's stable testid for the "See previous comments"
+    # / "See previous replies" pagination control — older comments live behind it
+    # and won't render until it's clicked (repeatedly, oldest-batch last).
     "expand_buttons": [
+        '[data-testid="seeMoreButton"]',
+        'button:has-text("See previous comments")',
         'button:has-text("Show more comments")',
         'button:has-text("View more replies")',
         'button:has-text("See previous replies")',
